@@ -1,0 +1,287 @@
+{
+  "name": "Score Lead Sub-workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "workflow-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "notes": "Entry point for lead scoring"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Prepare lead data for scoring\nconst lead = $input.item.json;\n\n// Create a comprehensive lead summary for AI scoring\nconst leadSummary = {\n  basicInfo: {\n    name: lead.enrichedData?.name || lead.fullName || `${lead.firstName} ${lead.lastName}`,\n    email: lead.email,\n    title: lead.title || lead.enrichedData?.title,\n    company: lead.company || lead.enrichedData?.company,\n    source: lead.source\n  },\n  companyInfo: {\n    size: lead.companySize || lead.enrichedData?.companySize,\n    revenue: lead.companyRevenue,\n    industry: lead.companyIndustry || lead.enrichedData?.industry,\n    tech: lead.companyTech,\n    description: lead.companyDescription\n  },\n  professionalInfo: {\n    seniority: lead.seniority,\n    skills: lead.skills || [],\n    experience: lead.experience,\n    education: lead.education\n  },\n  engagementData: {\n    hasLinkedIn: !!(lead.linkedin || lead.socialProfiles?.linkedin),\n    hasValidEmail: !!lead.email,\n    enrichmentScore: lead.enrichmentQualityScore || 0\n  },\n  scoringContext: {\n    idealCustomerProfile: $vars.ideal_customer_profile || 'B2B SaaS companies with 50-500 employees',\n    targetTitles: $vars.target_titles || ['CEO', 'CTO', 'VP', 'Director', 'Manager'],\n    targetIndustries: $vars.target_industries || ['Technology', 'Software', 'Internet']\n  }\n};\n\nlead.leadSummary = leadSummary;\nlead.scoringStarted = new Date().toISOString();\n\nreturn lead;"
+      },
+      "id": "prepare-scoring",
+      "name": "Prepare Scoring Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300],
+      "notes": "Prepares comprehensive lead data for AI scoring"
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4-turbo-preview",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an expert lead scoring AI. Score leads based on their fit with the ideal customer profile and likelihood to convert. Consider company size, industry, job title, seniority, and available contact information. Provide a score from 0-100 and a brief explanation."
+            },
+            {
+              "role": "user",
+              "content": "Score this lead based on the following information:\n\n{{JSON.stringify($json.leadSummary, null, 2)}}\n\nProvide your response in the following JSON format:\n{\n  \"score\": <number 0-100>,\n  \"scoreBreakdown\": {\n    \"companyFit\": <number 0-25>,\n    \"titleFit\": <number 0-25>,\n    \"engagementPotential\": <number 0-25>,\n    \"dataQuality\": <number 0-25>\n  },\n  \"strengths\": [<list of positive factors>],\n  \"weaknesses\": [<list of negative factors>],\n  \"recommendation\": \"<high_priority|medium_priority|low_priority|not_qualified>\",\n  \"summary\": \"<brief explanation of the score>\"\n}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 500,
+          "responseFormat": {
+            "type": "json_object"
+          }
+        }
+      },
+      "id": "openai-score",
+      "name": "OpenAI Score Lead",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "{{openAiCredentialId}}",
+          "name": "OpenAI API"
+        }
+      },
+      "notes": "AI-powered lead scoring using GPT-4"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse and process AI scoring results\nconst lead = $input.item.json;\nconst aiResponse = $node['OpenAI Score Lead'].json.choices[0].message.content;\n\ntry {\n  const scoringResult = JSON.parse(aiResponse);\n  \n  // Add scoring results to lead\n  lead.leadScore = scoringResult.score;\n  lead.scoreBreakdown = scoringResult.scoreBreakdown;\n  lead.scoreStrengths = scoringResult.strengths;\n  lead.scoreWeaknesses = scoringResult.weaknesses;\n  lead.scoreRecommendation = scoringResult.recommendation;\n  lead.scoreSummary = scoringResult.summary;\n  \n  // Add scoring metadata\n  lead.scoredAt = new Date().toISOString();\n  lead.scoringMethod = 'ai_gpt4';\n  lead.scoringVersion = '1.0';\n  \n  // Calculate priority based on score\n  if (lead.leadScore >= 80) {\n    lead.priority = 'high';\n  } else if (lead.leadScore >= 60) {\n    lead.priority = 'medium';\n  } else if (lead.leadScore >= 40) {\n    lead.priority = 'low';\n  } else {\n    lead.priority = 'not_qualified';\n  }\n  \n} catch (error) {\n  // Fallback scoring if AI fails\n  console.error('AI scoring failed:', error);\n  \n  // Simple rule-based scoring\n  let score = 50; // Base score\n  \n  if (lead.email) score += 10;\n  if (lead.company) score += 10;\n  if (lead.title) score += 10;\n  if (lead.companySize > 50) score += 10;\n  if (lead.enrichmentQualityScore > 70) score += 10;\n  \n  lead.leadScore = Math.min(score, 100);\n  lead.scoringMethod = 'rule_based_fallback';\n  lead.scoreSummary = 'Scored using fallback rules due to AI error';\n  lead.priority = score >= 70 ? 'medium' : 'low';\n}\n\nreturn lead;"
+      },
+      "id": "process-score",
+      "name": "Process Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300],
+      "notes": "Processes AI scoring with fallback logic"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$vars.enable_manual_review}}",
+              "value2": true
+            },
+            {
+              "value1": "={{$json.leadScore >= 70 && $json.leadScore <= 80}}",
+              "value2": true
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "id": "check-manual-review",
+      "name": "Check Manual Review",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 300],
+      "notes": "Routes borderline scores for manual review"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "manual_review_queue",
+        "columns": "lead_id,score,summary,created_at,status",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "score": "={{$json.leadScore}}",
+          "summary": "={{$json.scoreSummary}}",
+          "created_at": "={{new Date().toISOString()}}",
+          "status": "pending"
+        }
+      },
+      "id": "queue-review",
+      "name": "Queue for Review",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1250, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Adds to manual review queue"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "updateKey": "lead_id",
+        "columns": "lead_id,score,score_breakdown,priority,score_summary,scored_at,scoring_method",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "score": "={{$json.leadScore}}",
+          "score_breakdown": "={{JSON.stringify($json.scoreBreakdown)}}",
+          "priority": "={{$json.priority}}",
+          "score_summary": "={{$json.scoreSummary}}",
+          "scored_at": "={{$json.scoredAt}}",
+          "scoring_method": "={{$json.scoringMethod}}"
+        }
+      },
+      "id": "update-score-db",
+      "name": "Update Score in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1250, 400],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Updates lead record with score"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "scoring_logs",
+        "columns": "lead_id,score,method,breakdown,strengths,weaknesses,recommendation,scored_at",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "score": "={{$json.leadScore}}",
+          "method": "={{$json.scoringMethod}}",
+          "breakdown": "={{JSON.stringify($json.scoreBreakdown)}}",
+          "strengths": "={{JSON.stringify($json.scoreStrengths)}}",
+          "weaknesses": "={{JSON.stringify($json.scoreWeaknesses)}}",
+          "recommendation": "={{$json.scoreRecommendation}}",
+          "scored_at": "={{$json.scoredAt}}"
+        }
+      },
+      "id": "log-scoring",
+      "name": "Log Scoring Details",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Logs detailed scoring information"
+    }
+  ],
+  "connections": {
+    "workflow-trigger": {
+      "main": [
+        [
+          {
+            "node": "prepare-scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare-scoring": {
+      "main": [
+        [
+          {
+            "node": "openai-score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "openai-score": {
+      "main": [
+        [
+          {
+            "node": "process-score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "process-score": {
+      "main": [
+        [
+          {
+            "node": "check-manual-review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-manual-review": {
+      "main": [
+        [
+          {
+            "node": "queue-review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "update-score-db",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "queue-review": {
+      "main": [
+        [
+          {
+            "node": "update-score-db",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update-score-db": {
+      "main": [
+        [
+          {
+            "node": "log-scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "lead-generation"
+    },
+    {
+      "name": "sub-workflow"
+    },
+    {
+      "name": "scoring"
+    }
+  ],
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

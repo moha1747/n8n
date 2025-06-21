@@ -1,0 +1,517 @@
+      "id": "poll-trigger",
+      "name": "Poll Email Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 400],
+      "notes": "Alternative: Polls for replies every 15 minutes"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "filters": {
+          "labelIds": [
+            "UNREAD"
+          ],
+          "receivedAfter": "={{$now.minus({minutes: 15}).toISO()}}"
+        }
+      },
+      "id": "fetch-emails",
+      "name": "Fetch Recent Emails",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [450, 400],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "{{gmailCredentialId}}",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "notes": "Fetches unread emails from last 15 minutes"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Extract email data and check if it's a reply to our outreach\nconst email = $input.item.json;\n\n// Extract key information\nconst emailData = {\n  messageId: email.id,\n  threadId: email.threadId,\n  from: email.payload?.headers?.find(h => h.name === 'From')?.value || '',\n  to: email.payload?.headers?.find(h => h.name === 'To')?.value || '',\n  subject: email.payload?.headers?.find(h => h.name === 'Subject')?.value || '',\n  date: email.payload?.headers?.find(h => h.name === 'Date')?.value || '',\n  body: extractEmailBody(email),\n  inReplyTo: email.payload?.headers?.find(h => h.name === 'In-Reply-To')?.value || ''\n};\n\n// Extract email address\nconst fromMatch = emailData.from.match(/<(.+?)>/);\nemailData.senderEmail = fromMatch ? fromMatch[1] : emailData.from;\n\n// Check if this is a reply to our campaign\nemailData.isReply = !!emailData.inReplyTo || emailData.subject.toLowerCase().includes('re:');\n\nreturn emailData;\n\n// Helper function to extract email body\nfunction extractEmailBody(email) {\n  let body = '';\n  \n  function extractText(payload) {\n    if (payload.body?.data) {\n      return Buffer.from(payload.body.data, 'base64').toString('utf8');\n    }\n    \n    if (payload.parts) {\n      for (const part of payload.parts) {\n        if (part.mimeType === 'text/plain') {\n          return extractText(part);\n        }\n      }\n    }\n    \n    return '';\n  }\n  \n  return extractText(email.payload);\n}"
+      },
+      "id": "extract-email-data",
+      "name": "Extract Email Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300],
+      "notes": "Extracts and processes email content"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM email_logs WHERE message_id = $1 OR lead_email = $2 ORDER BY sent_at DESC LIMIT 1",
+        "additionalFields": {
+          "queryParams": "={{$json.inReplyTo}},{{$json.senderEmail}}"
+        }
+      },
+      "id": "lookup-lead",
+      "name": "Lookup Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [850, 300],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Finds the original lead from email logs"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.lead_id != null}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-lead-found",
+      "name": "Check Lead Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 300],
+      "notes": "Routes based on whether lead was found"
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4-turbo-preview",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an AI assistant analyzing email replies to cold outreach. Extract key information including: sentiment, intent, objections, questions, and next steps. Be specific and actionable."
+            },
+            {
+              "role": "user",
+              "content": "Analyze this email reply:\n\nFrom: {{$json.senderEmail}}\nSubject: {{$json.subject}}\nBody: {{$json.body}}\n\nProvide analysis in JSON format:\n{\n  \"sentiment\": \"<positive|neutral|negative>\",\n  \"intent\": \"<interested|not_interested|need_more_info|unsubscribe|out_of_office|other>\",\n  \"replyType\": \"<question|objection|acceptance|rejection|referral|ooo>\",\n  \"keyPoints\": [<list of main points from the email>],\n  \"objections\": [<list of any objections raised>],\n  \"questions\": [<list of any questions asked>],\n  \"nextAction\": \"<follow_up|schedule_meeting|send_info|remove_from_list|wait|none>\",\n  \"urgency\": \"<high|medium|low>\",\n  \"summary\": \"<brief summary of the reply>\"\n}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 500,
+          "responseFormat": {
+            "type": "json_object"
+          }
+        }
+      },
+      "id": "analyze-reply",
+      "name": "Analyze Reply with AI",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [1250, 200],
+      "credentials": {
+        "openAiApi": {
+          "id": "{{openAiCredentialId}}",
+          "name": "OpenAI API"
+        }
+      },
+      "notes": "AI analysis of email reply"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Process AI analysis results\nconst emailData = $input.item.json;\nconst leadData = $node['Lookup Lead'].json;\nconst aiAnalysis = JSON.parse($node['Analyze Reply with AI'].json.choices[0].message.content);\n\n// Combine all data\nconst replyData = {\n  // Email info\n  messageId: emailData.messageId,\n  threadId: emailData.threadId,\n  senderEmail: emailData.senderEmail,\n  subject: emailData.subject,\n  body: emailData.body,\n  receivedAt: emailData.date,\n  \n  // Lead info\n  leadId: leadData.lead_id,\n  leadName: leadData.lead_name,\n  leadCompany: leadData.lead_company,\n  originalEmailId: leadData.message_id,\n  \n  // AI Analysis\n  sentiment: aiAnalysis.sentiment,\n  intent: aiAnalysis.intent,\n  replyType: aiAnalysis.replyType,\n  keyPoints: aiAnalysis.keyPoints,\n  objections: aiAnalysis.objections,\n  questions: aiAnalysis.questions,\n  nextAction: aiAnalysis.nextAction,\n  urgency: aiAnalysis.urgency,\n  summary: aiAnalysis.summary,\n  \n  // Metadata\n  analyzedAt: new Date().toISOString(),\n  requiresResponse: ['interested', 'need_more_info', 'question'].includes(aiAnalysis.intent)\n};\n\n// Determine priority based on analysis\nif (aiAnalysis.intent === 'interested' && aiAnalysis.urgency === 'high') {\n  replyData.priority = 'urgent';\n} else if (aiAnalysis.intent === 'interested') {\n  replyData.priority = 'high';\n} else if (aiAnalysis.intent === 'need_more_info') {\n  replyData.priority = 'medium';\n} else {\n  replyData.priority = 'low';\n}\n\nreturn replyData;"
+      },
+      "id": "process-analysis",
+      "name": "Process Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 200],
+      "notes": "Combines analysis with lead data"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "email_replies",
+        "columns": "lead_id,message_id,thread_id,sender_email,subject,body,sentiment,intent,reply_type,key_points,objections,questions,next_action,urgency,summary,priority,received_at,analyzed_at",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "message_id": "={{$json.messageId}}",
+          "thread_id": "={{$json.threadId}}",
+          "sender_email": "={{$json.senderEmail}}",
+          "subject": "={{$json.subject}}",
+          "body": "={{$json.body}}",
+          "sentiment": "={{$json.sentiment}}",
+          "intent": "={{$json.intent}}",
+          "reply_type": "={{$json.replyType}}",
+          "key_points": "={{JSON.stringify($json.keyPoints)}}",
+          "objections": "={{JSON.stringify($json.objections)}}",
+          "questions": "={{JSON.stringify($json.questions)}}",
+          "next_action": "={{$json.nextAction}}",
+          "urgency": "={{$json.urgency}}",
+          "summary": "={{$json.summary}}",
+          "priority": "={{$json.priority}}",
+          "received_at": "={{$json.receivedAt}}",
+          "analyzed_at": "={{$json.analyzedAt}}"
+        }
+      },
+      "id": "store-reply",
+      "name": "Store Reply",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1650, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Stores reply and analysis in database"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "updateKey": "lead_id",
+        "columns": "lead_id,status,last_reply_at,reply_sentiment,reply_intent,engagement_score",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "status": "={{$json.intent === 'interested' ? 'qualified' : $json.intent === 'not_interested' ? 'disqualified' : 'engaged'}}",
+          "last_reply_at": "={{$json.receivedAt}}",
+          "reply_sentiment": "={{$json.sentiment}}",
+          "reply_intent": "={{$json.intent}}",
+          "engagement_score": "={{$json.sentiment === 'positive' ? 90 : $json.sentiment === 'neutral' ? 70 : 50}}"
+        }
+      },
+      "id": "update-lead-status",
+      "name": "Update Lead Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1850, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Updates lead record with reply status"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.nextAction}}",
+              "operation": "equals",
+              "value2": "follow_up"
+            }
+          ]
+        }
+      },
+      "id": "check-follow-up",
+      "name": "Check Follow-up Needed",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [2050, 200],
+      "notes": "Routes based on next action"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "follow_up_tasks",
+        "columns": "lead_id,task_type,priority,due_date,context,created_at,status",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "task_type": "email_follow_up",
+          "priority": "={{$json.priority}}",
+          "due_date": "={{$json.urgency === 'high' ? $now.plus({hours: 2}).toISO() : $now.plus({days: 1}).toISO()}}",
+          "context": "={{JSON.stringify({summary: $json.summary, questions: $json.questions, objections: $json.objections})}}",
+          "created_at": "={{new Date().toISOString()}}",
+          "status": "pending"
+        }
+      },
+      "id": "create-follow-up",
+      "name": "Create Follow-up Task",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2250, 100],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Creates follow-up task for sales team"
+    },
+    {
+      "parameters": {
+        "channel": "{{$json.priority === 'urgent' ? '#urgent-leads' : '#lead-replies'}}",
+        "text": ":envelope: New Reply from Lead\n\n*Lead:* {{$json.leadName}} at {{$json.leadCompany}}\n*Sentiment:* {{$json.sentiment}} {{$json.sentiment === 'positive' ? ':green_heart:' : $json.sentiment === 'negative' ? ':red_circle:' : ':yellow_heart:'}}\n*Intent:* {{$json.intent}}\n*Summary:* {{$json.summary}}\n*Next Action:* {{$json.nextAction}}\n{{$json.priority === 'urgent' ? '\n:rotating_light: *URGENT - Requires immediate attention!*' : ''}}",
+        "attachments": [],
+        "otherOptions": {}
+      },
+      "id": "notify-team",
+      "name": "Notify Sales Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [2250, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "{{slackCredentialId}}",
+          "name": "Slack API"
+        }
+      },
+      "notes": "Notifies team of important replies"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "gmail_messages",
+        "updateKey": "message_id",
+        "columns": "message_id,processed,processed_at",
+        "columnParameters": {
+          "message_id": "={{$json.messageId}}",
+          "processed": true,
+          "processed_at": "={{new Date().toISOString()}}"
+        }
+      },
+      "id": "mark-processed",
+      "name": "Mark Email Processed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2450, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Marks email as processed to avoid duplicates"
+    }
+  ],
+  "connections": {
+    "gmail-trigger": {
+      "main": [
+        [
+          {
+            "node": "extract-email-data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "poll-trigger": {
+      "main": [
+        [
+          {
+            "node": "fetch-emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch-emails": {
+      "main": [
+        [
+          {
+            "node": "extract-email-data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extract-email-data": {
+      "main": [
+        [
+          {
+            "node": "lookup-lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "lookup-lead": {
+      "main": [
+        [
+          {
+            "node": "check-lead-found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-lead-found": {
+      "main": [
+        [
+          {
+            "node": "analyze-reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "analyze-reply": {
+      "main": [
+        [
+          {
+            "node": "process-analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "process-analysis": {
+      "main": [
+        [
+          {
+            "node": "store-reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "store-reply": {
+      "main": [
+        [
+          {
+            "node": "update-lead-status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update-lead-status": {
+      "main": [
+        [
+          {
+            "node": "check-follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-follow-up": {
+      "main": [
+        [
+          {
+            "node": "create-follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "notify-team",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "mark-processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create-follow-up": {
+      "main": [
+        [
+          {
+            "node": "notify-team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "notify-team": {
+      "main": [
+        [
+          {
+            "node": "mark-processed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "lead-generation"
+    },
+    {
+      "name": "sub-workflow"
+    },
+    {
+      "name": "reply-handler"
+    }
+  ],
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}      },
+      "id": "poll-trigger",
+      "name": "Poll Email Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 400],
+      "notes": "Alternative: Polls for replies every 15 minutes"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "filters{
+  "name": "Reply Handler Sub-workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "email.received"
+        ],
+        "additionalFields": {}
+      },
+      "id": "gmail-trigger",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [250, 200],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "{{gmailCredentialId}}",
+          "name": "Gmail OAuth2"
+        }
+      },
+      "notes": "Triggers on new email replies"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }

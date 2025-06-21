@@ -1,0 +1,538 @@
+{
+  "name": "Advanced Lead Generation - Main Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-generation-webhook",
+        "authentication": "headerAuth",
+        "headerAuth": {
+          "name": "X-API-Key",
+          "value": "={{$credentials.webhookApiKey}}"
+        },
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "lead-gen-webhook",
+      "notes": "Entry point for external lead sources. Protected by header auth"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 500],
+      "notes": "Alternative entry: Polls for leads every 6 hours"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Validate incoming data structure\nconst item = $input.item.json;\nconst errors = [];\n\n// Check required fields\nif (!item.source) errors.push('Missing source field');\nif (!item.searchQuery && !item.leadData) errors.push('Missing searchQuery or leadData');\n\n// Add validation result\nitem.isValid = errors.length === 0;\nitem.validationErrors = errors;\nitem.timestamp = new Date().toISOString();\nitem.workflowRunId = $workflow.id;\n\nreturn item;"
+      },
+      "id": "validate-input",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [550, 400],
+      "notes": "Validates input structure and adds metadata"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.isValid}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-validation",
+      "name": "Check Validation",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [750, 400],
+      "notes": "Routes valid/invalid data"
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [250, 700],
+      "notes": "Central error handler for all workflow failures"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "error_logs",
+        "columns": "error_type,error_message,node_name,workflow_run_id,timestamp,raw_data",
+        "columnParameters": {
+          "error_type": "={{$json.error?.name || 'Unknown'}}",
+          "error_message": "={{$json.error?.message || $json.validationErrors?.join(', ') || 'Unknown error'}}",
+          "node_name": "={{$json.error?.node?.name || 'Validation'}}",
+          "workflow_run_id": "={{$json.workflowRunId}}",
+          "timestamp": "={{$json.timestamp}}",
+          "raw_data": "={{JSON.stringify($json)}}"
+        },
+        "options": {
+          "continueOnFail": true
+        }
+      },
+      "id": "log-error",
+      "name": "Log Error to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [950, 700],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Logs all errors to database for monitoring"
+    },
+    {
+      "parameters": {
+        "channel": "#lead-gen-alerts",
+        "text": ":warning: Lead Generation Error\n\n*Error Type:* {{$json.error?.name || 'Validation Error'}}\n*Message:* {{$json.error?.message || $json.validationErrors?.join(', ')}}\n*Node:* {{$json.error?.node?.name || 'Unknown'}}\n*Time:* {{$json.timestamp}}\n*Workflow Run:* {{$json.workflowRunId}}",
+        "attachments": [],
+        "otherOptions": {}
+      },
+      "id": "error-notification",
+      "name": "Error Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [1150, 700],
+      "credentials": {
+        "slackApi": {
+          "id": "{{slackCredentialId}}",
+          "name": "Slack API"
+        }
+      },
+      "notes": "Sends error alerts to Slack"
+    },
+    {
+      "parameters": {
+        "batchSize": "={{$vars.batch_size || 10}}",
+        "options": {}
+      },
+      "id": "batch-processor",
+      "name": "Batch Processor",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [950, 300],
+      "notes": "Processes leads in configurable batches"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{$vars.fetch_leads_workflow_id}}"
+      },
+      "id": "fetch-leads",
+      "name": "Fetch Leads",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1150, 300],
+      "notes": "Executes lead fetching sub-workflow"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{$vars.enrich_lead_workflow_id}}",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "enrich-lead",
+      "name": "Enrich Lead",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1350, 300],
+      "notes": "Executes lead enrichment sub-workflow"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{$vars.score_lead_workflow_id}}"
+      },
+      "id": "score-lead",
+      "name": "Score Lead",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1550, 300],
+      "notes": "Executes lead scoring sub-workflow"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.leadScore}}",
+              "operation": "largerEqual",
+              "value2": "={{$vars.score_threshold || 70}}"
+            }
+          ]
+        }
+      },
+      "id": "filter-leads",
+      "name": "Filter High Score Leads",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1750, 300],
+      "notes": "Filters leads based on score threshold"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "table": "leads",
+        "columns": "lead_id,email,company,score,status,enriched_data,created_at,updated_at",
+        "updateKey": "lead_id",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "email": "={{$json.email}}",
+          "company": "={{$json.company}}",
+          "score": "={{$json.leadScore}}",
+          "status": "low_score",
+          "enriched_data": "={{JSON.stringify($json.enrichedData)}}",
+          "created_at": "={{$json.createdAt || new Date().toISOString()}}",
+          "updated_at": "={{new Date().toISOString()}}"
+        }
+      },
+      "id": "archive-low-score",
+      "name": "Archive Low Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1950, 400],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Archives low-score leads for future reference"
+    },
+    {
+      "parameters": {
+        "workflowId": "={{$vars.draft_email_workflow_id}}"
+      },
+      "id": "draft-email",
+      "name": "Draft Email",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1950, 200],
+      "notes": "Executes email drafting sub-workflow"
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$vars.from_email}}",
+        "toEmail": "={{$json.email}}",
+        "subject": "={{$json.emailSubject}}",
+        "html": "={{$json.emailBody}}",
+        "options": {
+          "replyTo": "={{$vars.reply_to_email}}"
+        }
+      },
+      "id": "send-email",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [2150, 200],
+      "credentials": {
+        "sendGridApi": {
+          "id": "{{sendGridCredentialId}}",
+          "name": "SendGrid API"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Sends personalized email via SendGrid"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "email_logs",
+        "columns": "lead_id,email_type,status,subject,sent_at,message_id,error",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "email_type": "initial_outreach",
+          "status": "={{$node['Send Email'].error ? 'failed' : 'sent'}}",
+          "subject": "={{$json.emailSubject}}",
+          "sent_at": "={{new Date().toISOString()}}",
+          "message_id": "={{$node['Send Email'].json.messageId}}",
+          "error": "={{$node['Send Email'].error?.message}}"
+        }
+      },
+      "id": "log-email",
+      "name": "Log Email Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2350, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Logs email sending status"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "table": "leads",
+        "columns": "lead_id,status,last_contacted,email_sent",
+        "updateKey": "lead_id",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "status": "contacted",
+          "last_contacted": "={{new Date().toISOString()}}",
+          "email_sent": true
+        }
+      },
+      "id": "update-lead-status",
+      "name": "Update Lead Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [2550, 200],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Updates lead status after email sent"
+    },
+    {
+      "parameters": {
+        "channel": "#lead-gen-updates",
+        "text": ":chart_with_upwards_trend: Lead Generation Update\n\n*Batch Processed:* {{$node['Batch Processor'].context.currentRunIndex + 1}}/{{$node['Batch Processor'].context.maxRunIndex + 1}}\n*High Score Leads:* {{$node['Filter High Score Leads'].context.itemsMatched || 0}}\n*Emails Sent:* {{$node['Send Email'].context.itemsProcessed || 0}}\n*Time:* {{new Date().toISOString()}}",
+        "attachments": [],
+        "otherOptions": {}
+      },
+      "id": "progress-notification",
+      "name": "Progress Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [2750, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "{{slackCredentialId}}",
+          "name": "Slack API"
+        }
+      },
+      "notes": "Sends progress updates to Slack"
+    }
+  ],
+  "connections": {
+    "webhook-trigger": {
+      "main": [
+        [
+          {
+            "node": "validate-input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "schedule-trigger": {
+      "main": [
+        [
+          {
+            "node": "validate-input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "validate-input": {
+      "main": [
+        [
+          {
+            "node": "check-validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-validation": {
+      "main": [
+        [
+          {
+            "node": "batch-processor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "log-error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "error-trigger": {
+      "main": [
+        [
+          {
+            "node": "log-error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "log-error": {
+      "main": [
+        [
+          {
+            "node": "error-notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "batch-processor": {
+      "main": [
+        [
+          {
+            "node": "fetch-leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch-leads": {
+      "main": [
+        [
+          {
+            "node": "enrich-lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "enrich-lead": {
+      "main": [
+        [
+          {
+            "node": "score-lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "score-lead": {
+      "main": [
+        [
+          {
+            "node": "filter-leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "filter-leads": {
+      "main": [
+        [
+          {
+            "node": "draft-email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "archive-low-score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "draft-email": {
+      "main": [
+        [
+          {
+            "node": "send-email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "send-email": {
+      "main": [
+        [
+          {
+            "node": "log-email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "log-email": {
+      "main": [
+        [
+          {
+            "node": "update-lead-status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update-lead-status": {
+      "main": [
+        [
+          {
+            "node": "progress-notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "{{error_handler_workflow_id}}"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "lead-generation"
+    },
+    {
+      "name": "production"
+    }
+  ],
+  "triggerCount": 2,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

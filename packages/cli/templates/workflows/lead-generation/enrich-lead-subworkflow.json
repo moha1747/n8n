@@ -1,0 +1,501 @@
+{
+  "name": "Enrich Lead Sub-workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "workflow-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "notes": "Entry point for lead enrichment"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Initialize enrichment tracking\nconst lead = $input.item.json;\nlead.enrichmentAttempts = [];\nlead.enrichmentStarted = new Date().toISOString();\n\n// Determine which enrichment services to use\nlead.enrichmentServices = [];\n\nif (!lead.email && (lead.website || lead.company)) {\n  lead.enrichmentServices.push('hunter');\n}\n\nif (lead.email || lead.company) {\n  lead.enrichmentServices.push('clearbit');\n}\n\nif (lead.firstName && lead.lastName) {\n  lead.enrichmentServices.push('peopledatalabs');\n}\n\nreturn lead;"
+      },
+      "id": "prepare-enrichment",
+      "name": "Prepare Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300],
+      "notes": "Determines which enrichment services to use"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.enrichmentServices.includes('hunter')}}",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "check-hunter",
+      "name": "Check Hunter.io",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 200],
+      "notes": "Routes to Hunter.io if needed"
+    },
+    {
+      "parameters": {
+        "url": "https://api.hunter.io/v2/domain-search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "domain",
+              "value": "={{$json.website?.replace('https://', '').replace('http://', '').split('/')[0] || $json.company + '.com'}}"
+            },
+            {
+              "name": "api_key",
+              "value": "={{$credentials.hunterApiKey}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "retry": {
+            "maxTries": 2,
+            "waitBetweenTries": 1000
+          }
+        }
+      },
+      "id": "hunter-api",
+      "name": "Hunter.io API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [850, 100],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "{{hunterCredentialId}}",
+          "name": "Hunter.io API"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Finds email addresses from domain"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Process Hunter.io results\nconst lead = $input.item.json;\nconst hunterData = $node['Hunter.io API'].json;\n\nif (hunterData.data && hunterData.data.emails) {\n  // Get the most confident email\n  const bestEmail = hunterData.data.emails\n    .sort((a, b) => b.confidence - a.confidence)[0];\n  \n  if (bestEmail) {\n    lead.email = lead.email || bestEmail.value;\n    lead.emailConfidence = bestEmail.confidence;\n    lead.emailSource = 'hunter.io';\n  }\n  \n  // Add pattern info\n  if (hunterData.data.pattern) {\n    lead.emailPattern = hunterData.data.pattern;\n  }\n}\n\nlead.enrichmentAttempts.push({\n  service: 'hunter',\n  timestamp: new Date().toISOString(),\n  success: !!hunterData.data,\n  error: $node['Hunter.io API'].error?.message\n});\n\nreturn lead;"
+      },
+      "id": "process-hunter",
+      "name": "Process Hunter Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 100],
+      "notes": "Extracts email data from Hunter.io"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.enrichmentServices.includes('clearbit')}}",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "check-clearbit",
+      "name": "Check Clearbit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 400],
+      "notes": "Routes to Clearbit if needed"
+    },
+    {
+      "parameters": {
+        "url": "https://person-stream.clearbit.com/v2/combined/find",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "email",
+              "value": "={{$json.email}}"
+            },
+            {
+              "name": "company",
+              "value": "={{$json.company}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "retry": {
+            "maxTries": 2,
+            "waitBetweenTries": 2000
+          }
+        }
+      },
+      "id": "clearbit-api",
+      "name": "Clearbit API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [850, 300],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "{{clearbitCredentialId}}",
+          "name": "Clearbit API"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Enriches person and company data"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Process Clearbit results\nconst lead = $input.item.json;\nconst clearbitData = $node['Clearbit API'].json;\n\nif (clearbitData.person) {\n  const person = clearbitData.person;\n  lead.firstName = lead.firstName || person.name?.givenName;\n  lead.lastName = lead.lastName || person.name?.familyName;\n  lead.fullName = person.name?.fullName;\n  lead.title = person.employment?.title;\n  lead.seniority = person.employment?.seniority;\n  lead.linkedin = person.linkedin?.handle;\n  lead.twitter = person.twitter?.handle;\n  lead.location = person.geo?.city + ', ' + person.geo?.state;\n}\n\nif (clearbitData.company) {\n  const company = clearbitData.company;\n  lead.company = lead.company || company.name;\n  lead.companyDomain = company.domain;\n  lead.companyDescription = company.description;\n  lead.companyIndustry = company.industry;\n  lead.companySize = company.metrics?.employees;\n  lead.companyRevenue = company.metrics?.estimatedAnnualRevenue;\n  lead.companyTech = company.tech;\n  lead.companyTags = company.tags;\n}\n\nlead.enrichmentAttempts.push({\n  service: 'clearbit',\n  timestamp: new Date().toISOString(),\n  success: !!(clearbitData.person || clearbitData.company),\n  error: $node['Clearbit API'].error?.message\n});\n\nreturn lead;"
+      },
+      "id": "process-clearbit",
+      "name": "Process Clearbit Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300],
+      "notes": "Extracts person and company data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.enrichmentServices.includes('peopledatalabs')}}",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "check-pdl",
+      "name": "Check PeopleDataLabs",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 600],
+      "notes": "Routes to PeopleDataLabs if needed"
+    },
+    {
+      "parameters": {
+        "url": "https://api.peopledatalabs.com/v5/person/enrich",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{$credentials.pdlApiKey}}"
+            },
+            {
+              "name": "first_name",
+              "value": "={{$json.firstName}}"
+            },
+            {
+              "name": "last_name",
+              "value": "={{$json.lastName}}"
+            },
+            {
+              "name": "company",
+              "value": "={{$json.company}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "retry": {
+            "maxTries": 2,
+            "waitBetweenTries": 1500
+          }
+        }
+      },
+      "id": "pdl-api",
+      "name": "PeopleDataLabs API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [850, 500],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "{{pdlCredentialId}}",
+          "name": "PeopleDataLabs API"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Enriches professional data"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Process PeopleDataLabs results\nconst lead = $input.item.json;\nconst pdlData = $node['PeopleDataLabs API'].json;\n\nif (pdlData.data) {\n  const person = pdlData.data;\n  \n  // Contact info\n  lead.emails = person.emails || [];\n  lead.phoneNumbers = person.phone_numbers || [];\n  \n  // Professional info\n  lead.currentCompany = person.job_company_name;\n  lead.currentTitle = person.job_title;\n  lead.jobStartDate = person.job_start_date;\n  \n  // Skills and interests\n  lead.skills = person.skills || [];\n  lead.interests = person.interests || [];\n  \n  // Social profiles\n  lead.socialProfiles = {\n    linkedin: person.linkedin_url,\n    twitter: person.twitter_url,\n    github: person.github_url\n  };\n  \n  // Education\n  lead.education = person.education || [];\n}\n\nlead.enrichmentAttempts.push({\n  service: 'peopledatalabs',\n  timestamp: new Date().toISOString(),\n  success: !!pdlData.data,\n  error: $node['PeopleDataLabs API'].error?.message\n});\n\nreturn lead;"
+      },
+      "id": "process-pdl",
+      "name": "Process PDL Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 500],
+      "notes": "Extracts professional profile data"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "leadId",
+              "field2": "leadId"
+            }
+          ]
+        },
+        "options": {
+          "clashHandling": {
+            "values": {
+              "mergeMode": "deepMerge",
+              "overrideEmpty": true
+            }
+          }
+        }
+      },
+      "id": "merge-enrichments",
+      "name": "Merge Enrichments",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1250, 300],
+      "notes": "Combines all enrichment results"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Calculate enrichment score and completeness\nconst lead = $input.item.json;\n\n// Calculate field completeness\nconst requiredFields = ['email', 'firstName', 'lastName', 'company', 'title'];\nconst presentFields = requiredFields.filter(field => lead[field]);\nlead.enrichmentCompleteness = (presentFields.length / requiredFields.length) * 100;\n\n// Calculate enrichment quality score\nlet qualityScore = 0;\nif (lead.email) qualityScore += 25;\nif (lead.company && lead.companySize) qualityScore += 20;\nif (lead.title && lead.seniority) qualityScore += 20;\nif (lead.linkedin || lead.socialProfiles?.linkedin) qualityScore += 15;\nif (lead.skills && lead.skills.length > 0) qualityScore += 10;\nif (lead.companyRevenue) qualityScore += 10;\n\nlead.enrichmentQualityScore = qualityScore;\nlead.enrichmentCompleted = new Date().toISOString();\n\n// Mark as enriched\nlead.isEnriched = true;\nlead.enrichedData = {\n  email: lead.email,\n  name: lead.fullName || `${lead.firstName} ${lead.lastName}`,\n  title: lead.title,\n  company: lead.company,\n  companySize: lead.companySize,\n  industry: lead.companyIndustry,\n  location: lead.location,\n  linkedin: lead.linkedin || lead.socialProfiles?.linkedin,\n  enrichmentScore: lead.enrichmentQualityScore\n};\n\nreturn lead;"
+      },
+      "id": "calculate-quality",
+      "name": "Calculate Quality Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 300],
+      "notes": "Calculates enrichment quality metrics"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "updateKey": "lead_id",
+        "columns": "lead_id,enriched_data,enrichment_score,enrichment_attempts,enriched_at",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "enriched_data": "={{JSON.stringify($json.enrichedData)}}",
+          "enrichment_score": "={{$json.enrichmentQualityScore}}",
+          "enrichment_attempts": "={{JSON.stringify($json.enrichmentAttempts)}}",
+          "enriched_at": "={{$json.enrichmentCompleted}}"
+        }
+      },
+      "id": "update-lead-db",
+      "name": "Update Lead DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1650, 300],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Updates lead record with enrichment data"
+    }
+  ],
+  "connections": {
+    "workflow-trigger": {
+      "main": [
+        [
+          {
+            "node": "prepare-enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare-enrichment": {
+      "main": [
+        [
+          {
+            "node": "check-hunter",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "check-clearbit",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "check-pdl",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-hunter": {
+      "main": [
+        [
+          {
+            "node": "hunter-api",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "merge-enrichments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "hunter-api": {
+      "main": [
+        [
+          {
+            "node": "process-hunter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "process-hunter": {
+      "main": [
+        [
+          {
+            "node": "merge-enrichments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-clearbit": {
+      "main": [
+        [
+          {
+            "node": "clearbit-api",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "merge-enrichments",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "clearbit-api": {
+      "main": [
+        [
+          {
+            "node": "process-clearbit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "process-clearbit": {
+      "main": [
+        [
+          {
+            "node": "merge-enrichments",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "check-pdl": {
+      "main": [
+        [
+          {
+            "node": "pdl-api",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "merge-enrichments",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "pdl-api": {
+      "main": [
+        [
+          {
+            "node": "process-pdl",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "process-pdl": {
+      "main": [
+        [
+          {
+            "node": "merge-enrichments",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "merge-enrichments": {
+      "main": [
+        [
+          {
+            "node": "calculate-quality",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calculate-quality": {
+      "main": [
+        [
+          {
+            "node": "update-lead-db",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "lead-generation"
+    },
+    {
+      "name": "sub-workflow"
+    },
+    {
+      "name": "enrichment"
+    }
+  ],
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

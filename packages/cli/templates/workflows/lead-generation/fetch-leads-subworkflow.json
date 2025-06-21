@@ -1,0 +1,510 @@
+{
+  "name": "Fetch Leads Sub-workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "workflow-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "notes": "Entry point when called from main workflow"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.source}}",
+              "operation": "equals",
+              "value2": "google_maps"
+            }
+          ]
+        }
+      },
+      "id": "route-source",
+      "name": "Route by Source",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [450, 300],
+      "notes": "Routes to appropriate API based on source"
+    },
+    {
+      "parameters": {
+        "url": "https://maps.googleapis.com/maps/api/place/textsearch/json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{$json.searchQuery}}"
+            },
+            {
+              "name": "key",
+              "value": "={{$credentials.googleMapsApiKey}}"
+            },
+            {
+              "name": "fields",
+              "value": "name,formatted_address,formatted_phone_number,website,place_id,types"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "maxTries": 3,
+            "waitBetweenTries": 2000
+          }
+        }
+      },
+      "id": "google-maps-api",
+      "name": "Google Maps API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [650, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "{{googleMapsCredentialId}}",
+          "name": "Google Maps API"
+        }
+      },
+      "notes": "Fetches business data from Google Maps"
+    },
+    {
+      "parameters": {
+        "url": "https://api.reddit.com/r/{{$json.subreddit || 'startups'}}/search.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{$json.searchQuery}}"
+            },
+            {
+              "name": "limit",
+              "value": "25"
+            },
+            {
+              "name": "sort",
+              "value": "relevance"
+            },
+            {
+              "name": "t",
+              "value": "month"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-lead-gen-bot/1.0"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "reddit-api",
+      "name": "Reddit API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [650, 400],
+      "notes": "Fetches leads from Reddit discussions"
+    },
+    {
+      "parameters": {
+        "url": "https://api.linkedin.com/v2/people",
+        "authentication": "oAuth2",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "{{$json.searchQuery}}"
+            },
+            {
+              "name": "fields",
+              "value": "id,firstName,lastName,headline,emailAddress,publicProfileUrl"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "linkedin-api",
+      "name": "LinkedIn API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [650, 600],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "{{linkedInCredentialId}}",
+          "name": "LinkedIn OAuth2"
+        }
+      },
+      "notes": "Fetches professional leads from LinkedIn"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Transform Google Maps results to standard lead format\nconst results = $input.item.json.results || [];\nconst leads = [];\n\nfor (const place of results) {\n  // Extract email from website if possible\n  const lead = {\n    leadId: `gm_${place.place_id}`,\n    source: 'google_maps',\n    company: place.name,\n    address: place.formatted_address,\n    phone: place.formatted_phone_number,\n    website: place.website,\n    types: place.types,\n    rawData: place,\n    createdAt: new Date().toISOString(),\n    needsEnrichment: true\n  };\n  \n  leads.push(lead);\n}\n\nreturn leads;"
+      },
+      "id": "transform-google",
+      "name": "Transform Google Maps",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 200],
+      "notes": "Standardizes Google Maps data"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Transform Reddit results to standard lead format\nconst posts = $input.item.json.data?.children || [];\nconst leads = [];\n\nfor (const post of posts) {\n  const data = post.data;\n  \n  // Extract potential leads from post content\n  const lead = {\n    leadId: `reddit_${data.id}`,\n    source: 'reddit',\n    title: data.title,\n    author: data.author,\n    subreddit: data.subreddit,\n    url: `https://reddit.com${data.permalink}`,\n    content: data.selftext || '',\n    score: data.score,\n    rawData: data,\n    createdAt: new Date().toISOString(),\n    needsEnrichment: true\n  };\n  \n  leads.push(lead);\n}\n\nreturn leads;"
+      },
+      "id": "transform-reddit",
+      "name": "Transform Reddit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400],
+      "notes": "Standardizes Reddit data"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Transform LinkedIn results to standard lead format\nconst profiles = $input.item.json.elements || [];\nconst leads = [];\n\nfor (const profile of profiles) {\n  const lead = {\n    leadId: `linkedin_${profile.id}`,\n    source: 'linkedin',\n    firstName: profile.firstName?.localized?.en_US,\n    lastName: profile.lastName?.localized?.en_US,\n    headline: profile.headline?.localized?.en_US,\n    email: profile.emailAddress,\n    profileUrl: profile.publicProfileUrl,\n    rawData: profile,\n    createdAt: new Date().toISOString(),\n    needsEnrichment: !profile.emailAddress\n  };\n  \n  leads.push(lead);\n}\n\nreturn leads;"
+      },
+      "id": "transform-linkedin",
+      "name": "Transform LinkedIn",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 600],
+      "notes": "Standardizes LinkedIn data"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "merge-leads",
+      "name": "Merge All Leads",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1050, 400],
+      "notes": "Combines leads from all sources"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "raw_leads",
+        "columns": "lead_id,source,data,created_at,processed",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "source": "={{$json.source}}",
+          "data": "={{JSON.stringify($json)}}",
+          "created_at": "={{$json.createdAt}}",
+          "processed": false
+        },
+        "options": {
+          "onConflict": "lead_id:update"
+        }
+      },
+      "id": "store-raw-leads",
+      "name": "Store Raw Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1250, 400],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Stores raw lead data for processing"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Add metadata and prepare for enrichment\nconst lead = $input.item.json;\n\n// Add processing metadata\nlead.fetchedAt = new Date().toISOString();\nlead.workflowRunId = $workflow.id;\nlead.batchId = `${$workflow.id}_${Date.now()}`;\n\n// Flag for enrichment priority\nif (!lead.email || !lead.company) {\n  lead.enrichmentPriority = 'high';\n} else {\n  lead.enrichmentPriority = 'normal';\n}\n\nreturn lead;"
+      },
+      "id": "prepare-output",
+      "name": "Prepare Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 400],
+      "notes": "Adds final metadata before returning"
+    }
+  ],
+  "connections": {
+    "workflow-trigger": {
+      "main": [
+        [
+          {
+            "node": "route-source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "route-source": {
+      "main": [
+        [
+          {
+            "node": "google-maps-api",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "reddit-api",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "linkedin-api",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "google-maps-api": {
+      "main": [
+        [
+          {
+            "node": "transform-google",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "reddit-api": {
+      "main": [
+        [
+          {
+            "node": "transform-reddit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "linkedin-api": {
+      "main": [
+        [
+          {
+            "node": "transform-linkedin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transform-google": {
+      "main": [
+        [
+          {
+            "node": "merge-leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transform-reddit": {
+      "main": [
+        [
+          {
+            "node": "merge-leads",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "transform-linkedin": {
+      "main": [
+        [
+          {
+            "node": "merge-leads",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "merge-leads": {
+      "main": [
+        [
+          {
+            "node": "store-raw-leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "store-raw-leads": {
+      "main": [
+        [
+          {
+            "node": "prepare-output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "lead-generation"
+    },
+    {
+      "name": "sub-workflow"
+    }
+  ],
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}
+  ],
+  "connections": {
+    "workflow-trigger": {
+      "main": [
+        [
+          {
+            "node": "route-source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "route-source": {
+      "main": [
+        [
+          {
+            "node": "google-maps-api",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "reddit-api",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "linkedin-api",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "google-maps-api": {
+      "main": [
+        [
+          {
+            "node": "transform-google",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "reddit-api": {
+      "main": [
+        [
+          {
+            "node": "transform-reddit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "linkedin-api": {
+      "main": [
+        [
+          {
+            "node": "transform-linkedin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transform-google": {
+      "main": [
+        [
+          {
+            "node": "merge-leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "transform-reddit": {
+      "main": [
+        [
+          {
+            "node": "merge-leads",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "transform-linkedin": {
+      "main": [
+        [
+          {
+            "node": "merge-leads",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "merge-leads": {
+      "main": [
+        [
+          {
+            "node": "store-raw-leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "store-raw-leads": {
+      "main": [
+        [
+          {
+            "node": "prepare-output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }

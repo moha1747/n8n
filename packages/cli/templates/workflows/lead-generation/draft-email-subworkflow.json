@@ -1,0 +1,296 @@
+{
+  "name": "Draft Email Sub-workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "workflow-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "notes": "Entry point for email drafting"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Prepare context for email generation\nconst lead = $input.item.json;\n\n// Determine email template based on lead characteristics\nlet templateType = 'generic';\nif (lead.source === 'linkedin') {\n  templateType = 'linkedin_connection';\n} else if (lead.companySize > 100) {\n  templateType = 'enterprise';\n} else if (lead.source === 'reddit') {\n  templateType = 'community_based';\n}\n\n// Create email context\nconst emailContext = {\n  recipient: {\n    name: lead.enrichedData?.name || lead.fullName || lead.firstName,\n    title: lead.title || lead.enrichedData?.title,\n    company: lead.company || lead.enrichedData?.company,\n    email: lead.email\n  },\n  companyInfo: {\n    name: lead.company,\n    size: lead.companySize,\n    industry: lead.companyIndustry,\n    painPoints: extractPainPoints(lead)\n  },\n  sender: {\n    name: $vars.sender_name || 'John Smith',\n    title: $vars.sender_title || 'Sales Director',\n    company: $vars.company_name || 'YourCompany',\n    value_proposition: $vars.value_proposition || 'We help companies like yours increase efficiency by 40%'\n  },\n  leadContext: {\n    source: lead.source,\n    score: lead.leadScore,\n    strengths: lead.scoreStrengths || [],\n    interests: lead.interests || []\n  },\n  templateType: templateType,\n  personalizationLevel: lead.enrichmentQualityScore > 70 ? 'high' : 'medium'\n};\n\nlead.emailContext = emailContext;\nlead.draftingStarted = new Date().toISOString();\n\nreturn lead;\n\n// Helper function\nfunction extractPainPoints(lead) {\n  const painPoints = [];\n  \n  if (lead.companySize < 50) {\n    painPoints.push('scaling operations efficiently');\n  }\n  if (lead.companySize > 200) {\n    painPoints.push('managing complex workflows');\n  }\n  if (lead.companyIndustry === 'Technology') {\n    painPoints.push('staying competitive in a fast-moving market');\n  }\n  \n  return painPoints;\n}"
+      },
+      "id": "prepare-context",
+      "name": "Prepare Email Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300],
+      "notes": "Prepares comprehensive context for email generation"
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4-turbo-preview",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an expert cold email copywriter. Write personalized, engaging cold emails that get responses. Keep emails concise (under 150 words), focus on value to the recipient, and include a clear call-to-action. Use a conversational tone and avoid being overly salesy."
+            },
+            {
+              "role": "user",
+              "content": "Write a cold email based on this context:\n\n{{JSON.stringify($json.emailContext, null, 2)}}\n\nRequirements:\n- Personalized opening line referencing their company or role\n- Clear value proposition relevant to their likely pain points\n- Social proof or credibility builder\n- Single, clear call-to-action\n- Professional but conversational tone\n- Subject line that gets opened\n\nProvide response in JSON format:\n{\n  \"subject\": \"<compelling subject line>\",\n  \"greeting\": \"<personalized greeting>\",\n  \"opening\": \"<attention-grabbing opening line>\",\n  \"body\": \"<main email body with value prop>\",\n  \"cta\": \"<clear call to action>\",\n  \"signature\": \"<professional signature>\",\n  \"ps\": \"<optional PS line>\"\n}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 600,
+          "responseFormat": {
+            "type": "json_object"
+          }
+        }
+      },
+      "id": "openai-draft",
+      "name": "OpenAI Draft Email",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "{{openAiCredentialId}}",
+          "name": "OpenAI API"
+        }
+      },
+      "notes": "AI-powered email drafting"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Process and format email draft\nconst lead = $input.item.json;\nconst aiResponse = $node['OpenAI Draft Email'].json.choices[0].message.content;\n\ntry {\n  const emailDraft = JSON.parse(aiResponse);\n  \n  // Construct full email HTML\n  const emailHtml = `\n    <html>\n      <body style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #333;\">\n        <p>${emailDraft.greeting}</p>\n        <p>${emailDraft.opening}</p>\n        <p>${emailDraft.body}</p>\n        <p>${emailDraft.cta}</p>\n        <p>${emailDraft.signature}</p>\n        ${emailDraft.ps ? `<p style=\"font-style: italic;\">PS: ${emailDraft.ps}</p>` : ''}\n      </body>\n    </html>\n  `;\n  \n  // Plain text version\n  const emailText = `\n${emailDraft.greeting}\n\n${emailDraft.opening}\n\n${emailDraft.body}\n\n${emailDraft.cta}\n\n${emailDraft.signature}\n${emailDraft.ps ? `\n\nPS: ${emailDraft.ps}` : ''}\n  `.trim();\n  \n  // Add to lead object\n  lead.emailSubject = emailDraft.subject;\n  lead.emailBody = emailHtml;\n  lead.emailBodyText = emailText;\n  lead.emailDraft = emailDraft;\n  lead.draftedAt = new Date().toISOString();\n  lead.draftVersion = '1.0';\n  \n} catch (error) {\n  // Fallback template if AI fails\n  console.error('AI drafting failed:', error);\n  \n  const fallbackSubject = `Quick question about ${lead.company || 'your company'}`;\n  const fallbackBody = `\n    <html>\n      <body style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #333;\">\n        <p>Hi ${lead.firstName || 'there'},</p>\n        <p>I noticed ${lead.company || 'your company'} is in the ${lead.companyIndustry || 'industry'} space.</p>\n        <p>We've helped similar companies reduce operational costs by 30% through our workflow automation platform.</p>\n        <p>Would you be open to a brief 15-minute call next week to explore if we could help ${lead.company || 'you'} achieve similar results?</p>\n        <p>Best regards,<br>\n        ${lead.emailContext?.sender?.name || 'John'}<br>\n        ${lead.emailContext?.sender?.title || 'Sales Director'}</p>\n      </body>\n    </html>\n  `;\n  \n  lead.emailSubject = fallbackSubject;\n  lead.emailBody = fallbackBody;\n  lead.draftVersion = 'fallback';\n}\n\nreturn lead;"
+      },
+      "id": "format-email",
+      "name": "Format Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300],
+      "notes": "Formats email with HTML and fallback"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$vars.enable_email_variants}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-variants",
+      "name": "Check A/B Testing",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 300],
+      "notes": "Enables A/B testing variants"
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-3.5-turbo",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "Create an alternative version of this email with a different angle or approach. Make it notably different while maintaining the same core value proposition."
+            },
+            {
+              "role": "user",
+              "content": "Original email:\nSubject: {{$json.emailSubject}}\nBody: {{$json.emailBodyText}}\n\nCreate a variant with a different approach (e.g., more direct, question-based, benefit-focused, etc.)"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.8,
+          "maxTokens": 400
+        }
+      },
+      "id": "create-variant",
+      "name": "Create Email Variant",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [1250, 200],
+      "credentials": {
+        "openAiApi": {
+          "id": "{{openAiCredentialId}}",
+          "name": "OpenAI API"
+        }
+      },
+      "notes": "Creates A/B test variant"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Assign A/B test variant\nconst lead = $input.item.json;\n\n// Randomly assign variant\nif (Math.random() < 0.5) {\n  // Keep original\n  lead.emailVariant = 'A';\n} else {\n  // Use variant if available\n  const variantResponse = $node['Create Email Variant']?.json?.choices?.[0]?.message?.content;\n  if (variantResponse) {\n    // Parse variant and update\n    lead.emailVariant = 'B';\n    lead.emailVariantContent = variantResponse;\n    // You would parse and format the variant here\n  } else {\n    lead.emailVariant = 'A';\n  }\n}\n\nreturn lead;"
+      },
+      "id": "assign-variant",
+      "name": "Assign Variant",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 200],
+      "notes": "Randomly assigns A/B variant"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "email_drafts",
+        "columns": "lead_id,subject,body_html,body_text,variant,context,drafted_at,draft_version",
+        "columnParameters": {
+          "lead_id": "={{$json.leadId}}",
+          "subject": "={{$json.emailSubject}}",
+          "body_html": "={{$json.emailBody}}",
+          "body_text": "={{$json.emailBodyText}}",
+          "variant": "={{$json.emailVariant || 'A'}}",
+          "context": "={{JSON.stringify($json.emailContext)}}",
+          "drafted_at": "={{$json.draftedAt}}",
+          "draft_version": "={{$json.draftVersion}}"
+        }
+      },
+      "id": "store-draft",
+      "name": "Store Email Draft",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1450, 400],
+      "credentials": {
+        "postgres": {
+          "id": "{{postgresCredentialId}}",
+          "name": "Postgres Lead DB"
+        }
+      },
+      "notes": "Stores email draft for sending"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Add email metadata and prepare for sending\nconst lead = $input.item.json;\n\n// Add tracking parameters\nconst trackingId = `${lead.leadId}_${Date.now()}`;\nlead.emailTrackingId = trackingId;\n\n// Add UTM parameters to any links\nif (lead.emailBody.includes('href=')) {\n  lead.emailBody = lead.emailBody.replace(\n    /href=\"([^\"]+)\"/g,\n    `href=\"$1?utm_source=cold_email&utm_medium=email&utm_campaign=lead_gen&utm_content=${trackingId}\"`\n  );\n}\n\n// Add open tracking pixel\nconst trackingPixel = `<img src=\"${$vars.tracking_pixel_url}?id=${trackingId}\" width=\"1\" height=\"1\" style=\"display:none;\" />`;\nlead.emailBody = lead.emailBody.replace('</body>', `${trackingPixel}</body>`);\n\n// Mark as ready to send\nlead.emailReady = true;\nlead.emailPreparedAt = new Date().toISOString();\n\nreturn lead;"
+      },
+      "id": "add-tracking",
+      "name": "Add Tracking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 300],
+      "notes": "Adds tracking and prepares for sending"
+    }
+  ],
+  "connections": {
+    "workflow-trigger": {
+      "main": [
+        [
+          {
+            "node": "prepare-context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare-context": {
+      "main": [
+        [
+          {
+            "node": "openai-draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "openai-draft": {
+      "main": [
+        [
+          {
+            "node": "format-email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "format-email": {
+      "main": [
+        [
+          {
+            "node": "check-variants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check-variants": {
+      "main": [
+        [
+          {
+            "node": "create-variant",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "store-draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create-variant": {
+      "main": [
+        [
+          {
+            "node": "assign-variant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "assign-variant": {
+      "main": [
+        [
+          {
+            "node": "store-draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "store-draft": {
+      "main": [
+        [
+          {
+            "node": "add-tracking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "lead-generation"
+    },
+    {
+      "name": "sub-workflow"
+    },
+    {
+      "name": "email-drafting"
+    }
+  ],
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+}
